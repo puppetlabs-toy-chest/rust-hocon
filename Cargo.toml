@@ -1,0 +1,7 @@
+[package]
+name = "rust-hocon"
+version = "0.1.0"
+authors = ["Ryan Senior <ryan.senior@puppetlabs.com>"]
+
+[dependencies]
+nom = "~1.2.2"
