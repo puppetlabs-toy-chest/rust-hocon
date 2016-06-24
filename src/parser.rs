@@ -11,7 +11,8 @@ enum JSON_Value<'a>{
     Int(i64),
     Str(&'a str),
     Bool(bool),
-    Object(HashMap<&'a str,JSON_Value<'a> >)
+    Object(HashMap<&'a str,JSON_Value<'a> >),
+    Vec(Vec< JSON_Value<'a> >)
 }
 
 named!(quoted_str<&str>, 
@@ -53,21 +54,28 @@ named!(json_boolean<JSON_Value>,
        alt!(value!(JSON_Value::Bool(true), tag!("true")) | value!(JSON_Value::Bool(true),tag!("true"))));
 
 
-named!(json_value<JSON_Value>, alt!(json_float | json_int  | quoted_str_val | json_boolean));
-
 named!(keypair<(&str,JSON_Value)>,
        separated_pair!(quoted_str, char!(':'), json_value));
 
 named!(object < Vec<(&str,JSON_Value)> >, delimited!(char!('{'), separated_list!(char!(','),keypair), char!('}')));
 
+
+
 fn pairs_to_map<K: Hash + Eq,V>(v: Vec<(K, V)>) -> HashMap<K,V> {
     v.into_iter().fold(HashMap::new(), |mut m, (k, v)| { m.insert(k,v); m })
 }
 
-named!(object_map < HashMap<&str,JSON_Value> >, 
+named!(object_map < JSON_Value >, 
        delimited!(char!('{'), 
-                  map!(separated_list!(char!(','),keypair), pairs_to_map ),
+                  map!(separated_list!(char!(','),keypair), |x| { JSON_Value::Object(pairs_to_map(x)) } ),
                   char!('}')));
+
+named!(json_value<JSON_Value>, alt!(json_float | json_int  | quoted_str_val | json_boolean | object_map | json_array));
+
+named!(json_array < JSON_Value >, 
+       delimited!(char!('['), 
+                  map!(separated_list!(char!(','),json_value), JSON_Value::Vec  ),
+                  char!(']')));
 
 // #[cfg(test)]
 // mod test {
@@ -129,8 +137,40 @@ named!(object_map < HashMap<&str,JSON_Value> >,
         res.insert("baz",JSON_Value::Int(123));
         res.insert("withafloat",JSON_Value::Float(123.123));
         assert_eq!(object_map(&b"{\"foo\":true,\"bar\":\"with\\\"quotes\",\"baz\":123,\"withafloat\":123.123}"[..]), 
-                   IResult::Done(&b""[..],res));
+                   IResult::Done(&b""[..],JSON_Value::Object(res)));
+
+        let mut res = HashMap::new();
+        let mut nested_res = HashMap::new();
+
+        nested_res.insert("nestedfoo",JSON_Value::Bool(true));
+        nested_res.insert("bar",JSON_Value::Str("with\\\"quotes"));
+        nested_res.insert("baz",JSON_Value::Int(123));
+        nested_res.insert("withafloat",JSON_Value::Float(123.123));
+        res.insert("foo",JSON_Value::Object(nested_res));
+        assert_eq!(object_map(&b"{\"foo\":{\"nestedfoo\":true,\"bar\":\"with\\\"quotes\",\"baz\":123,\"withafloat\":123.123}}"[..]), 
+                   IResult::Done(&b""[..],JSON_Value::Object(res)));
     }
+
+#[test]
+fn check_array(){
+
+    assert_eq!(json_value(&b"[1,2,3,4]"[..]), 
+               IResult::Done(&b""[..],
+                             JSON_Value::Vec(vec![JSON_Value::Int(1),
+                                                  JSON_Value::Int(2),
+                                                  JSON_Value::Int(3),
+                                                  JSON_Value::Int(4)])));
+    let mut res = HashMap::new();
+    res.insert("foo",JSON_Value::Bool(true));
+    res.insert("bar",JSON_Value::Str("with\\\"quotes"));
+    res.insert("baz",JSON_Value::Int(123));
+    res.insert("withafloat",JSON_Value::Float(123.123));
+
+    assert_eq!(json_value(&b"[{\"foo\":true,\"bar\":\"with\\\"quotes\",\"baz\":123,\"withafloat\":123.123}]"[..]), 
+               IResult::Done(&b""[..],
+                             JSON_Value::Vec(vec![JSON_Value::Object(res)])))
+
+}
     
 //}
 
