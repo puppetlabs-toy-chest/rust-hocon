@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::hash::Hash;
 
 #[derive(PartialEq,Debug)]
-enum JsonValue<'a> {
+pub enum JsonValue<'a> {
     Float(f64),
     Int(i64),
     Str(&'a str),
@@ -58,10 +58,15 @@ named!(json_null<JsonValue>,
        value!(JsonValue::Null, tag!("null")));
 
 named!(keypair<(&str,JsonValue)>,
-       separated_pair!(quoted_str, char!(':'), json_value));
+       separated_pair!(quoted_str,
+                       chain!(
+                           multispace? ~
+                           char!(':') ~
+                           multispace? ,
 
-named!(object< Vec<(&str,JsonValue)> >,
-       delimited!(char!('{'), separated_list!(char!(','),keypair), char!('}')));
+                           ||{}
+                       ),
+                       json_value));
 
 fn pairs_to_map<K: Hash + Eq, V>(v: Vec<(K, V)>) -> HashMap<K, V> {
     v.into_iter().fold(HashMap::new(), |mut m, (k, v)| {
@@ -72,9 +77,33 @@ fn pairs_to_map<K: Hash + Eq, V>(v: Vec<(K, V)>) -> HashMap<K, V> {
 
 named!(object_map<JsonValue>,
        delimited!(char!('{'),
-                  map!(separated_list!(char!(','),keypair),
-                       |x| { JsonValue::Object(pairs_to_map(x)) }),
+                  map!(
+                      separated_list!(
+                          chain!(multispace? ~
+                                 char!(',') ~
+                                 multispace? ,
+
+                                 ||{}
+                          ),
+                          keypair
+                      ),
+                      |x| { JsonValue::Object(pairs_to_map(x)) }),
                   char!('}')));
+
+named!(json_array<JsonValue>,
+       delimited!(char!('['),
+                  map!(
+                      separated_list!(
+                          chain!(multispace? ~
+                                 char!(',') ~
+                                 multispace? ,
+
+                                 ||{}
+                          ),
+                          json_value
+                      ),
+                      JsonValue::Vec),
+                  char!(']')));
 
 named!(json_value<JsonValue>,
        alt!(json_null |
@@ -84,12 +113,6 @@ named!(json_value<JsonValue>,
             json_boolean |
             object_map |
             json_array));
-
-named!(json_array<JsonValue>,
-       delimited!(char!('['),
-                  map!(separated_list!(char!(','), json_value),
-                       JsonValue::Vec),
-                  char!(']')));
 
 #[test]
 fn check_quoted_str() {
@@ -136,28 +159,13 @@ fn check_pairs_to_map() {
 
 
 #[test]
-fn check_object() {
-    assert_eq!(object(&b"{\"foo\":\"bar\"}"[..]),
-               IResult::Done(&b""[..],vec![("foo",JsonValue::Str("bar"))]));
-    assert_eq!(object(&b"{\"foo\":123}"[..]),
-               IResult::Done(&b""[..],vec![("foo",JsonValue::Int(123))]));
-    assert_eq!(object(&b"{\"foo\":123.123}"[..]),
-               IResult::Done(&b""[..],vec![("foo",JsonValue::Float(123.123))]));
-    assert_eq!(object(&b"{\"foo\":true}"[..]),
-               IResult::Done(&b""[..],vec![("foo",JsonValue::Bool(true))]));
-    assert_eq!(object(&b"{\"foo\":true,\"bar\":\"with\\\"quotes\",\"baz\":123,\"withafloat\":123.123}"[..]),
-               IResult::Done(&b""[..],
-                             vec![("foo",JsonValue::Bool(true)),
-                                  ("bar",JsonValue::Str("with\\\"quotes")),
-                                  ("baz",JsonValue::Int(123)),
-                                  ("withafloat",JsonValue::Float(123.123))]));
-
+fn check_object_map() {
     let mut res = HashMap::new();
     res.insert("foo", JsonValue::Bool(true));
     res.insert("bar", JsonValue::Str("with\\\"quotes"));
     res.insert("baz", JsonValue::Int(123));
     res.insert("withafloat", JsonValue::Float(123.123));
-    assert_eq!(object_map(&b"{\"foo\":true,\"bar\":\"with\\\"quotes\",\"baz\":123,\"withafloat\":123.123}"[..]),
+    assert_eq!(object_map(&b"{\"foo\" : true,\"bar\":\n\"with\\\"quotes\",\"baz\":123,\n\"withafloat\":123.123}"[..]),
                IResult::Done(&b""[..],JsonValue::Object(res)));
 
     let mut res = HashMap::new();
@@ -187,7 +195,7 @@ fn check_array() {
     res.insert("baz", JsonValue::Int(123));
     res.insert("withafloat", JsonValue::Float(123.123));
 
-    assert_eq!(json_value(&b"[{\"foo\":true,\"bar\":\"with\\\"quotes\",\"baz\":123,\"withafloat\":123.123}]"[..]),
+    assert_eq!(json_value(&b"[{\"foo\":true,\n\"bar\":\"with\\\"quotes\"  ,\"baz\":123,\"withafloat\":123.123}]"[..]),
                IResult::Done(&b""[..],
                              JsonValue::Vec(vec![JsonValue::Object(res)])))
 
