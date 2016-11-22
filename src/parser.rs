@@ -57,15 +57,29 @@ named!(json_boolean<JsonValue>,
 named!(json_null<JsonValue>,
        value!(JsonValue::Null, tag!("null")));
 
+macro_rules! multispaced (
+    ($i:expr, $submac:ident!( $($args:tt)* )) => (
+        delimited!($i, opt!(multispace), $submac!($($args)*), opt!(multispace));
+    );
+    ($i:expr, $f:expr) => (
+        multispaced!($i, call!($f));
+    );
+);
+
+macro_rules! multispace_delimited (
+    ($i:expr, $submac1:ident!( $($args1:tt)* ),
+     $submac2:ident!( $($args2:tt)* ), $submac3:ident!( $($args3:tt)* )) => (
+        delimited!($i, multispaced!($submac1!($($args1)*)),
+                   $submac2!($($args2)*), multispaced!($submac3!($($args3)*)));
+    );
+    ($i:expr, $f:expr) => (
+        multispaced!($i, call!($f));
+    );
+);
+
 named!(keypair<(&str,JsonValue)>,
        separated_pair!(quoted_str,
-                       chain!(
-                           multispace? ~
-                           char!(':') ~
-                           multispace? ,
-
-                           ||{}
-                       ),
+                       multispaced!(char!(':')),
                        json_value));
 
 fn pairs_to_map<K: Hash + Eq, V>(v: Vec<(K, V)>) -> HashMap<K, V> {
@@ -76,34 +90,27 @@ fn pairs_to_map<K: Hash + Eq, V>(v: Vec<(K, V)>) -> HashMap<K, V> {
 }
 
 named!(object_map<JsonValue>,
-       delimited!(char!('{'),
-                  map!(
-                      separated_list!(
-                          chain!(multispace? ~
-                                 char!(',') ~
-                                 multispace? ,
+       multispace_delimited!(
+           char!('{'),
+           map!(
+               separated_list!(
+                   multispaced!(char!(',')),
+                   keypair
+               ),
+               |x| { JsonValue::Object(pairs_to_map(x)) }),
+           char!('}')));
 
-                                 ||{}
-                          ),
-                          keypair
-                      ),
-                      |x| { JsonValue::Object(pairs_to_map(x)) }),
-                  char!('}')));
 
 named!(json_array<JsonValue>,
-       delimited!(char!('['),
-                  map!(
-                      separated_list!(
-                          chain!(multispace? ~
-                                 char!(',') ~
-                                 multispace? ,
-
-                                 ||{}
-                          ),
-                          json_value
-                      ),
-                      JsonValue::Vec),
-                  char!(']')));
+       multispace_delimited!(
+           char!('['),
+           map!(
+               separated_list!(
+                   multispaced!(char!(',')),
+                   json_value
+               ),
+               JsonValue::Vec),
+           char!(']')));
 
 named!(json_value<JsonValue>,
        alt!(json_null |
@@ -178,6 +185,11 @@ fn check_object_map() {
     res.insert("foo", JsonValue::Object(nested_res));
     assert_eq!(object_map(&b"{\"foo\":{\"nestedfoo\":true,\"bar\":\"with\\\"quotes\",\"baz\":123,\"withafloat\":123.123}}"[..]),
                IResult::Done(&b""[..],JsonValue::Object(res)));
+
+    let mut res2 = HashMap::new();
+    res2.insert("foo", JsonValue::Bool(true));
+    assert_eq!(object_map(&b"{ \"foo\" : true }"[..]),
+               IResult::Done(&b""[..],JsonValue::Object(res2)));
 }
 
 #[test]
@@ -197,6 +209,8 @@ fn check_array() {
 
     assert_eq!(json_value(&b"[{\"foo\":true,\n\"bar\":\"with\\\"quotes\"  ,\"baz\":123,\"withafloat\":123.123}]"[..]),
                IResult::Done(&b""[..],
-                             JsonValue::Vec(vec![JsonValue::Object(res)])))
+                             JsonValue::Vec(vec![JsonValue::Object(res)])));
 
+    assert_eq!(json_value(&b"[ \"foo\" ]"[..]),
+           IResult::Done(&b""[..], JsonValue::Vec(vec![JsonValue::Str("foo")])));
 }
