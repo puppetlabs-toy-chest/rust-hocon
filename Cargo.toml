@@ -4,4 +4,4 @@ version = "0.1.0"
 authors = ["Ryan Senior <ryan.senior@puppet.com>", "Andrew Roetker <andrew.roetker@puppet.com"]
 
 [dependencies]
-nom = "~1.2.2"
+nom = "^2.0"

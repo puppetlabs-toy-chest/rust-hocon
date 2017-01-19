@@ -18,7 +18,7 @@ pub enum JsonValue<'a> {
 named!(quoted_str<&str>,
        map_res!(delimited!(char!('"'),
                            escaped!(call!(alpha), '\\',
-                                    is_a_bytes!(&b"\"n\\"[..])),
+                                    is_a!(&b"\"n\\"[..])),
                            char!('"')),
                 str::from_utf8));
 
@@ -59,7 +59,7 @@ named!(json_null<JsonValue>,
 
 macro_rules! multispaced (
     ($i:expr, $submac:ident!( $($args:tt)* )) => (
-        delimited!($i, opt!(multispace), $submac!($($args)*), opt!(multispace));
+        delimited!($i, opt!(complete!(multispace)), $submac!($($args)*), opt!(complete!(multispace)));
     );
     ($i:expr, $f:expr) => (
         multispaced!($i, call!($f));
