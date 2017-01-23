@@ -5,26 +5,41 @@ use std::collections::HashMap;
 use std::hash::Hash;
 
 #[derive(PartialEq,Debug)]
-pub enum JsonValue<'a> {
+pub enum JsonValue {
     Float(f64),
     Int(i64),
-    Str(&'a str),
+    String(String),
     Bool(bool),
-    Object(HashMap<&'a str, JsonValue<'a>>),
-    Vec(Vec<JsonValue<'a>>),
+    Object(HashMap<String, JsonValue>),
+    Vec(Vec<JsonValue>),
     Null,
 }
 
 named!(quoted_str<&str>,
-       map_res!(delimited!(char!('"'),
-                           escaped!(call!(alpha), '\\',
-                                    is_a!(&b"\"n\\"[..])),
-                           char!('"')),
-                str::from_utf8));
+       map_res!(
+           delimited!(char!('"'),
+                      escaped!(call!(alpha), '\\', one_of!("\"n\\")),
+                      char!('"')),
+           str::from_utf8));
 
-named!(quoted_str_val<JsonValue>,
-       map!(quoted_str,
-            |x: &'a str| { JsonValue::Str(x) }));
+fn collect_string(s: (Vec<char>, &[u8])) -> Result<String, i8> {
+    Ok(s.0.into_iter().collect())
+}
+
+named!(unquoted_string<String>,
+       map_res!(
+           many_till!(
+               none_of!("$\"{}[]:=,+#`^?!@*&\\ \t\r\n"),
+               peek!(alt!(tag!("//") | is_a!("$\"{}[]:=,+#`^?!@*&\\ \t\r\n")))
+           ),
+           collect_string));
+
+named!(hocon_string<String>,
+       alt!(map!(quoted_str, |x: &'a str| { x.to_owned() }) |
+            unquoted_string));
+
+named!(hocon_string_val<JsonValue>,
+       map!(hocon_string, |x: String| { JsonValue::String(x) }));
 
 named!(json_int<JsonValue>,
        map!(
@@ -83,12 +98,12 @@ macro_rules! multispace_delimited (
     );
 );
 
-named!(keypair<(&str,JsonValue)>,
+named!(keypair<(String,JsonValue)>,
        alt!(
-           separated_pair!(quoted_str,
+           separated_pair!(hocon_string,
                            opt!(multispaced!(alt!(char!(':') | char!('=')))),
                            object_map) |
-           separated_pair!(quoted_str,
+           separated_pair!(hocon_string,
                            multispaced!(alt!(char!(':') | char!('='))),
                            json_value)
        )
@@ -133,10 +148,11 @@ named!(json_value<JsonValue>,
        alt!(json_null |
             json_float |
             json_int |
-            quoted_str_val |
             json_boolean |
             object_map |
-            json_array));
+            json_array |
+            hocon_string_val
+       ));
 
 #[test]
 fn check_quoted_str() {
@@ -145,14 +161,11 @@ fn check_quoted_str() {
     assert_eq!(quoted_str(&b"\"foo\""[..]),
                IResult::Done(empty,"foo"));
 
-    assert_eq!(quoted_str_val(&b"\"foo\""[..]),
-               IResult::Done(empty,JsonValue::Str("foo")));
-
     assert_eq!(quoted_str(&b"\"f\\\"o\\\"o\""[..]),
                IResult::Done(empty,"f\\\"o\\\"o"));
 
-    assert_eq!(quoted_str_val(&b"\"f\\\"o\\\"o\""[..]),
-               IResult::Done(empty,JsonValue::Str("f\\\"o\\\"o")));
+    assert_eq!(hocon_string_val(&b"fo/o {}"[..]),
+               IResult::Done(&b" {}"[..],JsonValue::String("fo/o".to_owned())));
 }
 
 
@@ -181,30 +194,29 @@ fn check_pairs_to_map() {
                                  ("c",JsonValue::Int(3))]));
 }
 
-
 #[test]
 fn check_object_map() {
     let mut res = HashMap::new();
-    res.insert("foo", JsonValue::Bool(true));
-    res.insert("bar", JsonValue::Str("with\\\"quotes"));
-    res.insert("baz", JsonValue::Int(123));
-    res.insert("withafloat", JsonValue::Float(123.123));
-    assert_eq!(object_map(&b"{\"foo\" : true,\"bar\"=\n\"with\\\"quotes\",\"baz\":123,\n\"withafloat\":123.123}"[..]),
+    res.insert("foo".to_owned(), JsonValue::Bool(true));
+    res.insert("bar".to_owned(), JsonValue::String("with\\\"quotes".to_owned()));
+    res.insert("baz".to_owned(), JsonValue::Int(123));
+    res.insert("withafloat".to_owned(), JsonValue::Float(123.123));
+    assert_eq!(object_map(&b"{foo : true,\"bar\"=\n\"with\\\"quotes\",\"baz\":123,\n\"withafloat\":123.123}"[..]),
                IResult::Done(&b""[..],JsonValue::Object(res)));
 
     let mut res = HashMap::new();
     let mut nested_res = HashMap::new();
 
-    nested_res.insert("nestedfoo", JsonValue::Bool(true));
-    nested_res.insert("bar", JsonValue::Str("with\\\"quotes"));
-    nested_res.insert("baz", JsonValue::Int(123));
-    nested_res.insert("withafloat", JsonValue::Float(123.123));
-    res.insert("foo", JsonValue::Object(nested_res));
+    nested_res.insert("nestedfoo".to_owned(), JsonValue::Bool(true));
+    nested_res.insert("bar".to_owned(), JsonValue::String("with\\\"quotes".to_owned()));
+    nested_res.insert("baz".to_owned(), JsonValue::Int(123));
+    nested_res.insert("withafloat".to_owned(), JsonValue::Float(123.123));
+    res.insert("foo".to_owned(), JsonValue::Object(nested_res));
     assert_eq!(object_map(&b"{\"foo\" {\"nestedfoo\":true,\"bar\":\"with\\\"quotes\",\"baz\":123,\"withafloat\":123.123}}"[..]),
                IResult::Done(&b""[..],JsonValue::Object(res)));
 
     let mut res2 = HashMap::new();
-    res2.insert("foo", JsonValue::Bool(true));
+    res2.insert("foo".to_owned(), JsonValue::Bool(true));
     assert_eq!(object_map(&b"{ \"foo\" : true }"[..]),
                IResult::Done(&b""[..],JsonValue::Object(res2)));
 }
@@ -219,15 +231,15 @@ fn check_array() {
                                                  JsonValue::Null,
                                                  JsonValue::Int(4)])));
     let mut res = HashMap::new();
-    res.insert("foo", JsonValue::Bool(true));
-    res.insert("bar", JsonValue::Str("with\\\"quotes"));
-    res.insert("baz", JsonValue::Int(123));
-    res.insert("withafloat", JsonValue::Float(123.123));
+    res.insert("foo".to_owned(), JsonValue::Bool(true));
+    res.insert("bar".to_owned(), JsonValue::String("with\\\"quotes".to_owned()));
+    res.insert("baz".to_owned(), JsonValue::Int(123));
+    res.insert("withafloat".to_owned(), JsonValue::Float(123.123));
 
     assert_eq!(json_value(&b"[{\"foo\":true,\n\"bar\":\"with\\\"quotes\"  ,\"baz\":123,\"withafloat\":123.123}]"[..]),
                IResult::Done(&b""[..],
                              JsonValue::Vec(vec![JsonValue::Object(res)])));
 
     assert_eq!(json_value(&b"[ \"foo\" ]"[..]),
-           IResult::Done(&b""[..], JsonValue::Vec(vec![JsonValue::Str("foo")])));
+           IResult::Done(&b""[..], JsonValue::Vec(vec![JsonValue::String("foo".to_owned())])));
 }
