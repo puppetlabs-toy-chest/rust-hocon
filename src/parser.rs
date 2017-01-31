@@ -44,7 +44,7 @@ named!(unquoted_string<String>,
            ),
            collect_string));
 
-fn concat_strings(mut ss: Vec<(String, bool)>) -> Result<String, i8> {
+fn concat_strings(mut ss: Vec<(String, bool)>) -> String {
     if let Some(&mut (ref mut s, false)) = ss.last_mut() {
         *s = s.trim_right().to_string();
     };
@@ -55,11 +55,11 @@ fn concat_strings(mut ss: Vec<(String, bool)>) -> Result<String, i8> {
         };
     }
     let s = ss.into_iter().fold(String::new(), |acc, s| acc + &s.0);
-    Ok(s)
+    s
 }
 
 named!(hocon_string<String>,
-       map_res!(
+       map!(
            many1!(
                alt!(map!(quoted_str, |x: &'a str| { (x.to_owned(), true)}) |
                     value!((" ".to_string(), false), tag!(" ")) |
@@ -153,35 +153,52 @@ fn pairs_to_map<K: Hash + Eq, V>(v: Vec<(K, V)>) -> HashMap<K, V> {
     })
 }
 
-named!(undelimited_object_map<JsonValue>,
+named!(undelimited_object_map<HashMap<String, JsonValue>>,
        terminated!(
            map!(separated_list!(
                multispaced!(char!(',')),
                keypair
-           ), |x| { JsonValue::Object(pairs_to_map(x)) }),
+           ), |x| { pairs_to_map(x) }),
            opt!(multispaced!(complete!(char!(','))))
        ));
 
 
 named!(object_map<JsonValue>,
-       multispace_delimited!(
-           char!('{'),
-           call!(undelimited_object_map),
-           char!('}')));
+       map!(
+           fold_many1!(
+               multispace_delimited!(
+                   char!('{'),
+                   call!(undelimited_object_map),
+                   char!('}')),
+               HashMap::new(),
+               |mut acc: HashMap<String,JsonValue>, obj: HashMap<String,JsonValue>| {
+                   acc.extend(obj.into_iter());
+                   acc
+               }
+
+           ),
+           JsonValue::Object));
 
 
 named!(json_array<JsonValue>,
-       multispace_delimited!(
-           char!('['),
-           map!(
-               terminated!(
-                   separated_list!(
-                       multispaced!(char!(',')),
-                       json_value
-                   ),
-                   opt!(multispaced!(char!(',')))),
-               JsonValue::Vec),
-           char!(']')));
+       map!(
+           fold_many1!(
+               multispace_delimited!(
+                   char!('['),
+                   terminated!(
+                       separated_list!(
+                           multispaced!(char!(',')),
+                           json_value
+                       ),
+                       opt!(multispaced!(char!(',')))),
+                   char!(']')),
+               Vec::new(),
+               |mut acc: Vec<_>, mut array| {
+                   acc.append(&mut array);
+                   acc
+               }
+           ),
+           JsonValue::Vec));
 
 named!(json_value<JsonValue>,
        alt!(json_null |
@@ -196,7 +213,7 @@ named!(json_value<JsonValue>,
 named!(hocon_config<JsonValue>,
        terminated!(alt!(
            multispaced!(object_map) |
-           multispaced!(undelimited_object_map)
+           multispaced!(map!(undelimited_object_map, JsonValue::Object))
        ), eof!()));
 
 #[test]
@@ -236,6 +253,13 @@ fn check_hocon_config() {
     res.insert("bar".to_owned(), JsonValue::String("bazz".to_string()));
 
     assert_eq!(hocon_config(&b"foo = bar, bar = bazz"[..]),
+               IResult::Done(empty,JsonValue::Object(res)));
+
+    let mut res = HashMap::new();
+    res.insert("foo".to_owned(), JsonValue::String("bar".to_string()));
+    res.insert("bar".to_owned(), JsonValue::String("foo".to_string()));
+
+    assert_eq!(hocon_config(&b"{ foo = bar, bar = bazz } { bar = foo }"[..]),
                IResult::Done(empty,JsonValue::Object(res)));
 }
 
@@ -302,6 +326,15 @@ fn check_array() {
                                                  JsonValue::Int(2),
                                                  JsonValue::Null,
                                                  JsonValue::Int(4)])));
+
+    assert_eq!(json_value(&b"[1,2,null,4,] [5]"[..]),
+               IResult::Done(&b""[..],
+                             JsonValue::Vec(vec![JsonValue::Int(1),
+                                                 JsonValue::Int(2),
+                                                 JsonValue::Null,
+                                                 JsonValue::Int(4),
+                                                 JsonValue::Int(5)])));
+
     let mut res = HashMap::new();
     res.insert("foo".to_owned(), JsonValue::Bool(true));
     res.insert("bar".to_owned(), JsonValue::String("with\\\"quotes".to_owned()));
