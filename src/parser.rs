@@ -26,17 +26,53 @@ fn collect_string(s: (Vec<char>, &[u8])) -> Result<String, i8> {
     Ok(s.0.into_iter().collect())
 }
 
+fn end_of_file(input: &[u8]) -> IResult<&[u8],&[u8]> {
+    if input.is_empty() {
+        IResult::Done(input, &b""[..])
+    } else {
+        IResult::Error(error_position!(ErrorKind::Eof, input))
+    }
+}
+
 named!(unquoted_string<String>,
        map_res!(
            many_till!(
                none_of!("$\"{}[]:=,+#`^?!@*&\\ \t\r\n"),
-               peek!(alt!(tag!("//") | is_a!("$\"{}[]:=,+#`^?!@*&\\ \t\r\n")))
+               peek!(alt_complete!(tag!("//") |
+                                   is_a!("$\"{}[]:=,+#`^?!@*&\\ \t\r\n") |
+                                   end_of_file))
            ),
            collect_string));
 
+fn concat_strings(mut ss: Vec<(String, bool)>) -> Result<String, i8> {
+    if let Some(&mut (ref mut s, false)) = ss.last_mut() {
+        *s = s.trim_right().to_string();
+    };
+    while Some(&("".to_string(), false)) == ss.last() {
+        ss.pop();
+        if let Some(&mut (ref mut s, false)) = ss.last_mut() {
+            *s = s.trim_right().to_string();
+        };
+    }
+    let s = ss.into_iter().fold(String::new(), |acc, s| acc + &s.0);
+    Ok(s)
+}
+
 named!(hocon_string<String>,
-       alt!(map!(quoted_str, |x: &'a str| { x.to_owned() }) |
-            unquoted_string));
+       map_res!(
+           many1!(
+               alt!(map!(quoted_str, |x: &'a str| { (x.to_owned(), true)}) |
+                    value!((" ".to_string(), false), tag!(" ")) |
+                    value!(("\t".to_string(), false), tag!("\t")) |
+                    value!(("\r".to_string(), false), tag!("\r")) |
+                    value!(("true".to_string(), false), tag!("true")) |
+                    value!(("false".to_string(), false), tag!("false")) |
+                    value!(("null".to_string(), false), tag!("null")) |
+                    map!(unquoted_string, |x: String| { (x, false) })
+               )
+           ),
+           concat_strings
+       ));
 
 named!(hocon_string_val<JsonValue>,
        map!(hocon_string, |x: String| { JsonValue::String(x) }));
@@ -117,17 +153,20 @@ fn pairs_to_map<K: Hash + Eq, V>(v: Vec<(K, V)>) -> HashMap<K, V> {
     })
 }
 
+named!(undelimited_object_map<JsonValue>,
+       terminated!(
+           map!(separated_list!(
+               multispaced!(char!(',')),
+               keypair
+           ), |x| { JsonValue::Object(pairs_to_map(x)) }),
+           opt!(multispaced!(complete!(char!(','))))
+       ));
+
+
 named!(object_map<JsonValue>,
        multispace_delimited!(
            char!('{'),
-           map!(
-               terminated!(
-                   separated_list!(
-                       multispaced!(char!(',')),
-                       keypair
-                   ),
-                   opt!(multispaced!(char!(',')))),
-               |x| { JsonValue::Object(pairs_to_map(x)) }),
+           call!(undelimited_object_map),
            char!('}')));
 
 
@@ -154,6 +193,12 @@ named!(json_value<JsonValue>,
             hocon_string_val
        ));
 
+named!(hocon_config<JsonValue>,
+       terminated!(alt!(
+           multispaced!(object_map) |
+           multispaced!(undelimited_object_map)
+       ), eof!()));
+
 #[test]
 fn check_quoted_str() {
     let empty = &b""[..];
@@ -164,8 +209,34 @@ fn check_quoted_str() {
     assert_eq!(quoted_str(&b"\"f\\\"o\\\"o\""[..]),
                IResult::Done(empty,"f\\\"o\\\"o"));
 
-    assert_eq!(hocon_string_val(&b"fo/o {}"[..]),
-               IResult::Done(&b" {}"[..],JsonValue::String("fo/o".to_owned())));
+    assert_eq!(hocon_string_val(&b"true fo/o {}"[..]),
+               IResult::Done(&b"{}"[..],JsonValue::String("true fo/o".to_owned())));
+}
+
+#[test]
+fn check_hocon_config() {
+    let empty = &b""[..];
+
+    let mut res = HashMap::new();
+    res.insert("foo".to_owned(), JsonValue::String("bar".to_string()));
+    res.insert("bar".to_owned(), JsonValue::String("foo".to_string()));
+
+    assert_eq!(hocon_config(&b"foo = bar, bar = foo,"[..]),
+               IResult::Done(empty,JsonValue::Object(res)));
+
+    let mut res = HashMap::new();
+    res.insert("foo".to_owned(), JsonValue::String("bar".to_string()));
+    res.insert("bar".to_owned(), JsonValue::String("foo".to_string()));
+
+    assert_eq!(hocon_config(&b"foo = bar, bar = foo    "[..]),
+               IResult::Done(empty,JsonValue::Object(res)));
+
+    let mut res = HashMap::new();
+    res.insert("foo".to_owned(), JsonValue::String("bar".to_string()));
+    res.insert("bar".to_owned(), JsonValue::String("bazz".to_string()));
+
+    assert_eq!(hocon_config(&b"foo = bar, bar = bazz"[..]),
+               IResult::Done(empty,JsonValue::Object(res)));
 }
 
 
@@ -209,10 +280,11 @@ fn check_object_map() {
 
     nested_res.insert("nestedfoo".to_owned(), JsonValue::Bool(true));
     nested_res.insert("bar".to_owned(), JsonValue::String("with\\\"quotes".to_owned()));
+    nested_res.insert("buzz".to_owned(), JsonValue::String("foo".to_owned()));
     nested_res.insert("baz".to_owned(), JsonValue::Int(123));
     nested_res.insert("withafloat".to_owned(), JsonValue::Float(123.123));
     res.insert("foo".to_owned(), JsonValue::Object(nested_res));
-    assert_eq!(object_map(&b"{\"foo\" {\"nestedfoo\":true,\"bar\":\"with\\\"quotes\",\"baz\":123,\"withafloat\":123.123}}"[..]),
+    assert_eq!(object_map(&b"{\"foo\" {\"nestedfoo\":true,\"bar\":\"with\\\"quotes\",\"baz\":123,\"withafloat\":123.123, buzz: foo }}"[..]),
                IResult::Done(&b""[..],JsonValue::Object(res)));
 
     let mut res2 = HashMap::new();
